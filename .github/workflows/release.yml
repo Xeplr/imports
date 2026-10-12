@@ -1,0 +1,131 @@
+# Release: bumps version, publishes to npm, pushes commit + tag.
+#
+# Runs automatically on every push to main (patch bump), and manually from
+# Actions → Release → Run workflow when you want minor or major.
+#
+# Order matters:
+#   1. test                      ← a failure here means nothing is bumped at all
+#   2. bump package.json + create local tag (npm version)
+#   3. publish to npm            ← if this fails, nothing is pushed → clean rollback
+#   4. push commit + tag         ← record of the release
+#
+# ── why this does not loop forever ──────────────────────────────────────────
+# Step 4 pushes a "Release vX" commit to main, which is itself a push to main.
+# Two things stop that becoming an infinite release loop:
+#
+#   1. GitHub does not fan out workflows for pushes made with GITHUB_TOKEN.
+#      This is the same anti-loop rule that already stops the tag push
+#      re-triggering publish.yml.
+#   2. Belt and braces: the job is skipped when the head commit is itself a
+#      release commit. If anyone ever swaps GITHUB_TOKEN for a PAT — which does
+#      fan out — rule 1 silently stops applying and only this guard remains.
+#
+# `[skip release]` anywhere in a commit message also skips it, for a README or
+# comment change not worth a version.
+#
+# Concurrency is serialised, not cancelled: two quick pushes must release one
+# after the other. Cancelling would abandon a run that had already published to
+# npm but not yet pushed its tag, leaving git and the registry disagreeing.
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    if: >-
+      !startsWith(github.event.head_commit.message, 'Release v') &&
+      !contains(github.event.head_commit.message, '[skip release]')
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Configure git as github-actions bot
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # Always install. Installing only when a lockfile exists meant
+      # xeplr-base-apis and xeplr-email — which have none — ran their tests
+      # with no dependencies at all, so every release of those two failed at
+      # the Test gate on missing modules.
+      - name: Install
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --ignore-scripts || npm install --ignore-scripts
+          else
+            npm install --ignore-scripts
+          fi
+          # `npm install` rewrites package-lock.json whenever it disagrees with
+          # package.json — which is exactly when the `npm ci` above failed. That
+          # leaves the tree dirty, and `npm version` refuses to run in a dirty
+          # tree ("Git working directory not clean"), so the release dies at the
+          # bump step.
+          #
+          # Commit the drift rather than discarding it: the lockfile genuinely
+          # was stale, and throwing the fix away would fail the same way on the
+          # next push.
+          if [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            git commit -m "chore: sync package-lock.json"
+          fi
+
+      # Tests run BEFORE the version bump, so a failure leaves nothing bumped,
+      # tagged, published or pushed — the same clean-rollback property the
+      # publish step already relies on.
+      #
+      # A package with no test script does not fail the release, but it does
+      # emit a warning, so "nothing was verified" is visible rather than silent.
+      - name: Test
+        run: |
+          if node -e "process.exit((require('./package.json').scripts||{}).test ? 0 : 1)"; then
+            npm test
+          else
+            echo "::warning::No test script in package.json — nothing was verified before publishing."
+          fi
+
+      - name: Bump version + create tag
+        run: |
+          npm version ${{ inputs.bump || 'patch' }} -m "Release v%s"
+          echo "NEW_VERSION=$(node -p "require('./package.json').version")" >> $GITHUB_ENV
+
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Push commit + tag
+        run: git push --follow-tags
+
+      - name: Summary
+        run: |
+          echo "### Released \`$(node -p "require('./package.json').name")@$NEW_VERSION\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- npm: https://www.npmjs.com/package/$(node -p "require('./package.json').name")" >> $GITHUB_STEP_SUMMARY

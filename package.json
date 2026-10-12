@@ -1,0 +1,54 @@
+{
+  "name": "@xeplr/imports",
+  "version": "1.0.0",
+  "description": "Data imports as a drop-in module: upload a CSV/Excel/JSON file, check it against the table, load it as a New table, Append or Replace, see and download the rows the database refused, and roll back — routes, access catalog and env in one package",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "lib/",
+    "migrations-auth/"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "keywords": [
+    "import",
+    "upload",
+    "csv",
+    "excel",
+    "express"
+  ],
+  "author": "xeplr",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Xeplr/xeplr-imports"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@xeplr/actions": "^1.1.23",
+    "@xeplr/base-apis": "^2.0.3",
+    "@xeplr/db": "^1.0.8",
+    "@xeplr/utils": "^1.0.13",
+    "csv-parse": "^7.0.3",
+    "fflate": "^0.8.3",
+    "multer": "^2.4.0",
+    "saxes": "^6.0.0",
+    "unzipper": "^0.12.5"
+  },
+  "peerDependencies": {
+    "express": "^4.0.0 || ^5.0.0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "express": "^5.3.0",
+    "knex": "^3.3.0",
+    "mysql2": "^3.24.5",
+    "pg": "^8.23.1"
+  }
+}
