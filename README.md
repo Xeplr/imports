@@ -2,6 +2,17 @@
 
 Data imports as a drop-in module. Upload a CSV, Excel or JSON file and check it against the table it is going into. Then load it as a **New table**, an **Append** or a **Replace**. Afterwards you can see and download the rows the database refused, and roll the import back. One package holds the routes, the access catalog and the settings. The screen is [`ImportsPage` in `@xeplr/ui-utils`](https://www.npmjs.com/package/@xeplr/ui-utils).
 
+## What you get
+
+- **Big files, no waiting.** CSV, Excel and JSON files of hundreds of megabytes upload and load in the background, with live progress and a stop button.
+- **New table, append or replace.** You choose what happens to the table. A typo in a table's name is caught, so it never turns into a new table.
+- **Replace without risk.** The table is only swapped once every row has loaded. An import that fails or is stopped leaves your data exactly as it was.
+- **Checked before it loads.** The file's columns are compared with the table first. You see what will be refused, what will be left empty and what matches, before anything is touched.
+- **Copy-paste damage repaired.** Rows that a paste from another system folded into one cell are found and put back.
+- **Nothing silently lost.** Every row the database refuses is kept with the reason. View it, copy it, or download it as Excel to fix and load again.
+- **Full history and undo.** Every import is recorded with who ran it, where it went and how it went, and can be rolled back.
+- **Drop-in.** One router and one screen, and the app supplies only its database connections.
+
 Every step underneath is [`@xeplr/actions`](https://www.npmjs.com/package/@xeplr/actions): its file readers, the uploader, the error table and staged loads. This package puts those steps behind HTTP and leaves the app only what is its own.
 
 ## Using it
