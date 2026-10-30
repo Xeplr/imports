@@ -1,6 +1,6 @@
 {
   "name": "@xeplr/imports",
-  "version": "1.0.1",
+  "version": "2.0.0",
   "description": "Data imports as a drop-in module: upload a CSV/Excel/JSON file, check it against the table, load it as a New table, Append or Replace, see and download the rows the database refused, and roll back — routes, access catalog and env in one package",
   "main": "index.js",
   "files": [
