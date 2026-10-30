@@ -23,6 +23,12 @@ var TABLE = 'imports_test_' + Date.now().toString(36);
 
 var ctx = {};
 
+// The data root an app sets (XEPLR_DATA_DIR): each tenant's uploads are in its
+// own folder under it, <root>/xeplr-imports-test/<company>/<workspace>/uploads.
+var DATA = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'xeplr-imports-data-')));
+process.env.XEPLR_DATA_DIR = DATA;
+var UPLOADS = path.join(DATA, 'xeplr-imports-test', COMPANY, WORKSPACE, 'uploads');
+
 function headers(extra) {
   return Object.assign({ 'x-company-id': COMPANY, 'x-workspace-id': WORKSPACE, 'x-test-user': 'u1' }, extra || {});
 }
@@ -89,8 +95,6 @@ test.before(async function() {
     ImportMeta: ImportMeta.bindKnex(boot.db)
   };
 
-  ctx.uploadDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xeplr-imports-test-'));
-  process.env.UPLOAD_DIR = ctx.uploadDir;
   var pg = require('pg');
   ctx.pool = new pg.Pool(PG);
 
@@ -126,24 +130,15 @@ test.after(async function() {
   await ctx.configDb.destroy();
   await ctx.admin.raw('DROP DATABASE IF EXISTS ' + CONFIG_DB);
   await ctx.admin.destroy();
-  fs.rmSync(ctx.uploadDir, { recursive: true, force: true });
+  fs.rmSync(DATA, { recursive: true, force: true });
 });
 
-test('router() refuses to start without what it needs, and UPLOAD_DIR must be absolute', function() {
+test('router() refuses to start without what it needs; the data root is required', function() {
   var imports = require('..');
   assert.throws(function() { imports.router({ listTargets: function() {}, service: 's' }); }, /needs resolveTarget/);
   assert.throws(function() { imports.router({ resolveTarget: function() {}, service: 's' }); }, /needs listTargets/);
   assert.throws(function() { imports.router({ resolveTarget: function() {}, listTargets: function() {} }); }, /needs `service`/);
-  var was = process.env.UPLOAD_DIR;
-  try {
-    delete process.env.UPLOAD_DIR;
-    assert.throws(function() { imports.router({ resolveTarget: function() {}, listTargets: function() {}, service: 's' }); }, /UPLOAD_DIR is not set/);
-    process.env.UPLOAD_DIR = 'relative/dir';
-    assert.throws(function() { imports.router({ resolveTarget: function() {}, listTargets: function() {}, service: 's' }); }, /must be an absolute path/);
-  } finally {
-    if (was === undefined) delete process.env.UPLOAD_DIR; else process.env.UPLOAD_DIR = was;
-  }
-  assert.deepEqual(imports.requiredEnv, ['UPLOAD_DIR', 'XCFG_DB_NAME']);
+  assert.deepEqual(imports.requiredEnv, ['XEPLR_DATA_DIR', 'XCFG_DB_NAME']);
   assert.ok(fs.existsSync(path.join(imports.authMigrationsDir, '0001_imports_access.sql')));
 });
 
@@ -158,8 +153,27 @@ test('a file outside the upload directory, or of a type we do not read, is refus
     assert.equal(r.status, 400);
     assert.match(r.body.error, /Unsupported file type/);
     assert.equal(fs.existsSync(txt), false, 'an unreadable upload is removed');
-    assert.equal((await call('POST', '/imports/inspect', { filePath: path.join(ctx.uploadDir, 'gone.csv') })).status, 404);
+    assert.equal((await call('POST', '/imports/inspect', { filePath: path.join(UPLOADS, 'gone.csv') })).status, 404);
   } finally { fs.rmSync(outside, { force: true }); }
+});
+
+test('an upload lands in its own company\'s folder, and another company cannot use it', { skip: skip }, async function() {
+  var mine = await upload('stock.csv', csv('Z', 2));
+  assert.equal(path.dirname(mine), UPLOADS, 'in <root>/<app>/<company>/<workspace>/uploads');
+  var theirs = await call('POST', '/imports/inspect', { filePath: mine }, { 'x-company-id': 'c2' });
+  assert.equal(theirs.status, 400, 'another company is refused the file');
+  var climb = await call('POST', '/imports/inspect', { filePath: '../../c1/w1/uploads/' + path.basename(mine) }, { 'x-company-id': 'c2' });
+  assert.equal(climb.status, 400);
+  var ownWorkspace = await call('POST', '/imports/inspect', { filePath: mine }, { 'x-workspace-id': 'w2' });
+  assert.equal(ownWorkspace.status, 400, 'and so is another workspace of the same company');
+  assert.equal((await call('POST', '/imports/inspect', { filePath: mine })).status, 200);
+  var other = await (async function() {
+    var form = new FormData();
+    form.append('file', new Blob(['sku,qty\nQ1,1\n'], { type: 'text/csv' }), 'q.csv');
+    var res = await fetch(ctx.base + '/imports/files', { method: 'POST', headers: headers({ 'x-company-id': 'c2' }), body: form });
+    return (await res.json()).filePath;
+  })();
+  assert.equal(path.dirname(other), path.join(DATA, 'xeplr-imports-test', 'c2', WORKSPACE, 'uploads'));
 });
 
 test('inspect finds rows pasted into one cell, per sheet, before anything loads', { skip: skip }, async function() {
@@ -225,13 +239,14 @@ test('rows the database refuses: kept, shown with their reason, downloadable to 
   var file = await fetch(ctx.base + '/imports/history/' + r.jobId + '/dropped/file', { headers: headers() });
   assert.equal(file.status, 200);
   assert.match(file.headers.get('content-disposition'), /stock - dropped rows\.xlsx/);
-  var saved = path.join(ctx.uploadDir, 'back.xlsx');
+  var saved = path.join(DATA, 'back.xlsx');
   fs.writeFileSync(saved, Buffer.from(await file.arrayBuffer()));
   var parsed = [];
   for await (var row of require('@xeplr/actions/lib/formats').getFormat('excel').parsePath(saved, {})) parsed.push(row);
   assert.deepEqual(parsed.map(function(p) { return p.sku; }), ['D2', 'D5']);
   assert.deepEqual(Object.keys(parsed[0]), ['sku', 'qty']);
-  assert.deepEqual(fs.readdirSync(ctx.uploadDir).filter(function(n) { return /^dropped-/.test(n); }), [], 'the download is not left behind');
+  var tmp = path.join(DATA, 'xeplr-imports-test', COMPANY, WORKSPACE, 'tmp');
+  assert.deepEqual((fs.existsSync(tmp) ? fs.readdirSync(tmp) : []).filter(function(n) { return /^dropped-/.test(n); }), [], 'the download is not left behind');
 
   var clean = await importFile(await upload('stock.csv', csv('E', 2)), [{ targetTable: TABLE, mode: 'append' }]);
   assert.equal((await call('GET', '/imports/history/' + clean.result.results[0].jobId + '/dropped/file')).status, 404);
