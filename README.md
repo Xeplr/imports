@@ -42,7 +42,7 @@ module.exports = [].concat(imports.requiredEnv /* , … */);
 
 ```
 # .env
-UPLOAD_DIR=/data/my-app/uploads          # required, absolute
+XEPLR_DATA_DIR=/srv/xeplr-data           # required, absolute: each tenant's files under it
 XCFG_DB_NAME=xeplr_configs               # required: where import records live
 XEPLR_AUTH_MIGRATIONS=…,/…/node_modules/@xeplr/imports/migrations-auth
 ```
@@ -65,9 +65,11 @@ Database drivers are the app's own: install `pg`, `mysql2`, `mssql` or `@duckdb/
 
 ## Settings
 
+**From 1.x (2.0.0):** `UPLOAD_DIR` is gone — set `XEPLR_DATA_DIR` (in `requiredEnv`), and call `@xeplr/db`'s `registerApplication()` at boot. Uploads now live per tenant.
+
 | Variable | Required | Meaning |
 |---|---|---|
-| `UPLOAD_DIR` | **yes**, absolute | Where uploaded files are staged until imported, and where a dropped-rows download is written for the moment it is sent. Never defaulted: a missing or relative one would make the same install read different files depending on where it was started. `router()` refuses to start without it. |
+| `XEPLR_DATA_DIR` | **yes**, absolute (`@xeplr/actions`) | The data root. An upload is staged in the requesting tenant's own `uploads/` folder under it (`<root>/<app>/<company>/<workspace>/uploads`) until imported; a dropped-rows download is written in its `tmp/` for the moment it is sent. Asked per request, so one company's files never sit beside another's. Never defaulted: a missing, relative or absent one is refused by name. |
 | `XCFG_DB_NAME` | **yes** | The `xeplr_configs` database holding `import_meta`. The login is `XCFG_DB_CONNECTION_INFO_ENCRYPTED`, or the shared `XEPLR_DB_CONNECTION` (`@xeplr/db`) |
 | `UPLOAD_MAX_MB` | no | The largest file accepted, default 500. Files go to disk and are streamed, so this costs disk, not memory. A proxy in front (nginx `client_max_body_size`) must allow at least as much |
 | `IMPORT_TIME_LIMIT_MINUTES` | no | How long an import may run before it is stopped, default 60 |
@@ -98,7 +100,7 @@ A commit result per part is `{ targetTable, sheet, success, rows, dropped, jobId
 - **Modes.** A **New table** must not exist yet. **Append** and **Replace** need one that does, so a typo is never a fresh table. A **Replace** is staged: the rows load into a staging table, then one transaction empties the table and moves them in. A Replace that fails or is stopped leaves the table as it was. See [`@xeplr/actions` Import modes](https://www.npmjs.com/package/@xeplr/actions#import-modes).
 - **Rollback is refused for a Replace**, because the rows it replaced are gone. It is also refused for an upsert (`primaryKeys`), which may only have updated rows that already existed.
 - **Refused rows are kept.** Each row the database refuses goes to `<table>_import_errors` with its place in the file and the reason, so it can be seen, fixed and loaded again. An import gives up after five refusals in a row, and rows after that are counted but not kept.
-- **A filePath is checked.** It comes from the client, so only a path inside `UPLOAD_DIR` is accepted. A file the import cannot read is removed at inspect, and an imported file is removed when its import ends.
+- **A filePath is checked.** It comes from the client, so only a file in the requesting tenant's own `uploads/` is accepted — never a file elsewhere on the server, and never another company's or workspace's upload (`../` and links followed first). A file the import cannot read is removed at inspect, and an imported file is removed when its import ends.
 
 ## Access
 

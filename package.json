@@ -29,10 +29,10 @@
     "access": "public"
   },
   "dependencies": {
-    "@xeplr/actions": "^1.1.23",
+    "@xeplr/actions": "^2.0.0",
     "@xeplr/base-apis": "^2.0.3",
     "@xeplr/db": "^1.0.8",
-    "@xeplr/utils": "^1.0.13",
+    "@xeplr/utils": "^1.1.0",
     "csv-parse": "^7.0.3",
     "fflate": "^0.8.3",
     "multer": "^2.4.0",
