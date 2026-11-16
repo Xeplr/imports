@@ -22,6 +22,22 @@ var COMPANY = 'c1', WORKSPACE = 'w1';
 var TABLE = 'imports_test_' + Date.now().toString(36);
 
 var ctx = {};
+var told = [];
+
+/** What the stream was told about one run, in order. */
+function toldAbout(runId) {
+  return told.filter(function(t) { return t.event.runId === runId; });
+}
+
+/** Wait until the stream has heard a run end, and give its last word. */
+async function ending(runId) {
+  for (var i = 0; i < 600; i++) {
+    var last = toldAbout(runId).slice(-1)[0];
+    if (last && last.event.status !== 'running') return last;
+    await new Promise(function(r) { setTimeout(r, 50); });
+  }
+  throw new Error('the run was never said to end');
+}
 
 // The data root an app sets (XEPLR_DATA_DIR): each tenant's uploads are in its
 // own folder under it, <root>/xeplr-imports-test/<company>/<workspace>/uploads.
@@ -114,7 +130,9 @@ test.before(async function() {
     },
     listTargets: async function() {
       return [{ connectionId: 'pg', label: 'Local', databases: [{ id: 'main', label: 'Main' }] }];
-    }
+    },
+    // The app's event stream, as far as the router can tell: what it was told, in order.
+    publish: function(userId, event) { told.push({ userId: userId, event: JSON.parse(JSON.stringify(event)) }); }
   }));
   await new Promise(function(resolve) { ctx.server = app.listen(0, '127.0.0.1', resolve); });
   ctx.base = 'http://127.0.0.1:' + ctx.server.address().port;
@@ -123,7 +141,7 @@ test.before(async function() {
 test.after(async function() {
   if (!PG) return;
   if (ctx.server) await new Promise(function(r) { ctx.server.close(r); });
-  for (var t of [TABLE + '__xeplr_staging', TABLE + '_import_errors', TABLE, 'pasted_test']) {
+  for (var t of [TABLE + '__xeplr_staging', TABLE + '_import_errors', TABLE, TABLE + '_big', TABLE + '_big_import_errors', 'pasted_test']) {
     await ctx.pool.query('DROP TABLE IF EXISTS "' + t + '"').catch(function() {});
   }
   await ctx.pool.end();
@@ -317,6 +335,49 @@ test('rollback undoes an Append; a Replace cannot be rolled back; delete removes
   assert.deepEqual(await skus(), ['R1', 'R2'], 'deleting the record leaves the data');
   assert.equal((await call('POST', '/imports/history/nope/delete')).status, 404);
   assert.equal((await call('POST', '/imports/history/nope/rollback')).status, 404);
+});
+
+test('a big file\'s check runs in the background and is told to the stream, as its import is', { skip: skip }, async function() {
+  var rows = ['sku,qty'];
+  for (var i = 0; i < 300000; i++) rows.push('B' + i + ',' + i);
+  var fp = await upload('big-check.csv', rows.join('\n'));
+  var bytes = fs.statSync(path.join(UPLOADS, path.basename(fp))).size;
+
+  var started = await call('POST', '/imports/inspect', { filePath: fp, background: true });
+  assert.equal(started.status, 202, 'answered at once, with a run');
+  assert.match(started.body.runId, /^imp_/);
+  var last = await ending(started.body.runId);
+  assert.equal(last.userId, 'u1', 'told to the person who asked, nobody else');
+  assert.deepEqual(last.event, {
+    type: 'import-run', runId: started.body.runId, kind: 'check', status: 'complete',
+    progress: { phase: 'checking', part: 1, parts: 1, sheet: null, rowsRead: 300000, bytesRead: bytes, bytes: bytes },
+    result: { format: 'csv', checks: {} }, error: null
+  }, 'the ending carries the same answer the plain inspect gives, and how far it read');
+  var plain = await call('POST', '/imports/inspect', { filePath: fp });
+  assert.deepEqual(plain.body, { format: 'csv', checks: {} }, 'without background: the old answer, unchanged');
+
+  var run = (await call('GET', '/imports/runs/' + started.body.runId)).body;
+  assert.equal(run.kind, 'check');
+  assert.deepEqual(run.result, last.event.result, 'asking gives the same as being told');
+  assert.equal((await call('GET', '/imports/runs/' + started.body.runId, null, { 'x-test-user': 'u2' })).status, 404);
+
+  // Stopped: said as stopped, with why.
+  var again = await call('POST', '/imports/inspect', { filePath: fp, background: true });
+  assert.equal((await call('POST', '/imports/runs/' + again.body.runId + '/stop')).body.stopped, true);
+  var stopped = await ending(again.body.runId);
+  assert.equal(stopped.event.status, 'stopped');
+  assert.equal(stopped.event.error, 'Stopped');
+  assert.equal(stopped.event.kind, 'check');
+
+  // The import is told the same way: running at most once a second, then its ending with the results.
+  var done = await importFile(fp, [{ targetTable: TABLE + '_big', mode: 'new' }], 'big-check.csv');
+  assert.equal(done.status, 'complete');
+  var imported = toldAbout(done.id);
+  var end = imported[imported.length - 1].event;
+  assert.equal(end.kind, 'import');
+  assert.equal(end.status, 'complete');
+  assert.equal(end.result.results[0].rows, 300000);
+  assert.ok(imported.every(function(t) { return t.userId === 'u1'; }));
 });
 
 test('a run is the importer\'s own, and it can be stopped', { skip: skip }, async function() {
