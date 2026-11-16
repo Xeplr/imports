@@ -1,10 +1,10 @@
 # @xeplr/imports
 
-Data imports as a drop-in module. Upload a CSV, Excel or JSON file and check it against the table it is going into. Then load it as a **New table**, an **Append** or a **Replace**. Afterwards you can see and download the rows the database refused, and roll the import back. One package holds the routes, the access catalog and the settings. The screen is [`ImportsPage` in `@xeplr/ui-utils`](https://www.npmjs.com/package/@xeplr/ui-utils).
+Data imports as a drop-in module. Upload a CSV, Excel, JSON or Parquet file and check it against the table it is going into. Then load it as a **New table**, an **Append** or a **Replace**. Afterwards you can see and download the rows the database refused, and roll the import back. One package holds the routes, the access catalog and the settings. The screen is [`ImportsPage` in `@xeplr/ui-utils`](https://www.npmjs.com/package/@xeplr/ui-utils).
 
 ## What you get
 
-- **Big files, no waiting.** CSV, Excel and JSON files of hundreds of megabytes upload and load in the background, with live progress and a stop button.
+- **Big files, no waiting.** CSV, Excel, JSON and Parquet files of hundreds of megabytes upload and load in the background, with live progress and a stop button.
 - **New table, append or replace.** You choose what happens to the table. A typo in a table's name is caught, so it never turns into a new table.
 - **Replace without risk.** The table is only swapped once every row has loaded. An import that fails or is stopped leaves your data exactly as it was.
 - **Checked before it loads.** The file's columns are compared with the table first. You see what will be refused, what will be left empty and what matches, before anything is touched.
@@ -12,6 +12,10 @@ Data imports as a drop-in module. Upload a CSV, Excel or JSON file and check it 
 - **Nothing silently lost.** Every row the database refuses is kept with the reason. View it, copy it, or download it as Excel to fix and load again.
 - **Full history and undo.** Every import is recorded with who ran it, where it went and how it went, and can be rolled back.
 - **Drop-in.** One router and one screen, and the app supplies only its database connections.
+
+**Parquet** needs `@duckdb/node-api` installed in the app (an optional peer of `@xeplr/actions`, which reads Parquet through DuckDB). Its columns keep their own types in the table: a number stays a number, a date a date, a yes/no a boolean. Without DuckDB a Parquet file is refused when it is read, saying what to install.
+
+**Files larger than `UPLOAD_MAX_MB`** — gigabytes — need sending in pieces rather than in one request. That is the app's to provide: a file sent another way into the tenant's `uploads/` folder is imported like any other (`POST /inspect` and `/commit` take any `filePath` inside it). `ImportsPage`'s `upload` prop (`@xeplr/ui-utils`) is where an app plugs its own sender in.
 
 Every step underneath is [`@xeplr/actions`](https://www.npmjs.com/package/@xeplr/actions): its file readers, the uploader, the error table and staged loads. This package puts those steps behind HTTP and leaves the app only what is its own.
 
@@ -117,6 +121,7 @@ The real router runs in an Express app, against real Postgres and a throwaway `x
 - refused paths and types
 - pasted rows found and recovered
 - each mode and its refusals
+- a Parquet file inspected, checked and loaded with its own types (a timestamp, a boolean, a number)
 - refused rows shown and downloaded
 - history scoped to a workspace
 - rollback, with a Replace refused

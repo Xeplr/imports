@@ -252,6 +252,35 @@ test('rows the database refuses: kept, shown with their reason, downloadable to 
   assert.equal((await call('GET', '/imports/history/' + clean.result.results[0].jobId + '/dropped/file')).status, 404);
 });
 
+test('a Parquet file: inspected, checked against the table, loaded with its own types', { skip: skip }, async function() {
+  var actions = require('@xeplr/actions');
+  var local = path.join(os.tmpdir(), 'events-' + Date.now() + '.parquet');
+  await actions.parquet.writeAll([1, 2, 3].map(function(i) {
+    return { sku: 'P' + i, qty: i * 1.5, at: new Date(Date.UTC(2026, 0, i, 9)), ok: i % 2 === 0 };
+  }), { file: local });
+  try {
+    var f = await upload('events.parquet', fs.readFileSync(local), 'application/vnd.apache.parquet');
+    var seen = await call('POST', '/imports/inspect', { filePath: f });
+    assert.equal(seen.status, 200);
+    assert.equal(seen.body.format, 'parquet');
+    var target = 'parquet_test';
+    var check = await call('POST', '/imports/check-target', { filePath: f, connectionId: 'pg', dbInfoId: 'main', targetTable: target });
+    assert.deepEqual(check.body, { exists: false, matched: [], extra: [], missing: [] });
+    var made = await importFile(f, [{ targetTable: target, mode: 'new' }], 'events.parquet');
+    assert.equal(made.result.results[0].success, true, JSON.stringify(made.result));
+    var types = {};
+    (await ctx.pool.query('SELECT column_name, data_type FROM information_schema.columns WHERE table_name = $1', [target])).rows
+      .forEach(function(r) { types[r.column_name] = r.data_type; });
+    assert.equal(types.at, 'timestamp with time zone');
+    assert.equal(types.ok, 'boolean');
+    assert.notEqual(types.qty, 'text');
+    assert.equal((await ctx.pool.query('SELECT count(*)::int AS n FROM ' + target)).rows[0].n, 3);
+  } finally {
+    fs.rmSync(local, { force: true });
+    await ctx.pool.query('DROP TABLE IF EXISTS parquet_test').catch(function() {});
+  }
+});
+
 test('history: newest first, with mode, destination and who; another workspace sees none of it', { skip: skip }, async function() {
   var h = (await call('GET', '/imports/history')).body.dataArray.filter(function(j) { return j.targetTable === TABLE; });
   assert.ok(h.length >= 4);

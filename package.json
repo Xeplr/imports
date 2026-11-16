@@ -29,7 +29,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@xeplr/actions": "^2.0.0",
+    "@xeplr/actions": "^2.2.10",
     "@xeplr/base-apis": "^2.0.3",
     "@xeplr/db": "^1.0.8",
     "@xeplr/utils": "^1.1.0",
@@ -46,6 +46,7 @@
     "test": "node --test test/*.test.js"
   },
   "devDependencies": {
+    "@duckdb/node-api": "^1.5.5-r.3",
     "express": "^5.3.0",
     "knex": "^3.3.0",
     "mysql2": "^3.24.5",
