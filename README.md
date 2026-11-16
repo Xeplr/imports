@@ -62,6 +62,7 @@ On the screen side, add one route for `<ImportsPage/>` and a drawer entry. That 
 | `listTargets(req)` | the same connections, as a list for the picker |
 | `service` | names this app's rows in the shared `import_meta` table. Or pass `config`, an `attachConfig()` instance the app already has |
 | `userNames(ids)` (optional) | names for records made before the importer's name was stored on them |
+| `publish(userId, event)` (optional) | the app's event stream (SSE). A check's and an import's progress and ending are told to the person who started them, so the page waits on the stream instead of asking every second. Pass the app's **own** publisher, e.g. `function(userId, e) { sse.publish('user:' + userId + ':imports', e); }` with the app's `@xeplr/base-apis` `sse`: this package's copy of base-apis is not the one the app's stream is attached to, so publishing through it would reach nobody. Without it the page asks `GET /runs/:id` |
 
 Tenancy comes from the app's `mtMiddleware`, as it does for its other routes. Each import record carries `mtId1`/`mtId2`, and history reads them back through the tenant filter, so another company's or workspace's imports are simply not found. Import records live in `xeplr_configs` and are application-scoped (`registerApplication()` at startup).
 
@@ -76,7 +77,7 @@ Database drivers are the app's own: install `pg`, `mysql2`, `mssql` or `@duckdb/
 | `XEPLR_DATA_DIR` | **yes**, absolute (`@xeplr/actions`) | The data root. An upload is staged in the requesting tenant's own `uploads/` folder under it (`<root>/<app>/<company>/<workspace>/uploads`) until imported; a dropped-rows download is written in its `tmp/` for the moment it is sent. Asked per request, so one company's files never sit beside another's. Never defaulted: a missing, relative or absent one is refused by name. |
 | `XCFG_DB_NAME` | **yes** | The `xeplr_configs` database holding `import_meta`. The login is `XCFG_DB_CONNECTION_INFO_ENCRYPTED`, or the shared `XEPLR_DB_CONNECTION` (`@xeplr/db`) |
 | `UPLOAD_MAX_MB` | no | The largest file accepted, default 500. Files go to disk and are streamed, so this costs disk, not memory. A proxy in front (nginx `client_max_body_size`) must allow at least as much |
-| `IMPORT_TIME_LIMIT_MINUTES` | no | How long an import may run before it is stopped, default 60 |
+| `IMPORT_TIME_LIMIT_MINUTES` | no | How long an import, or a check run in the background, may run before it is stopped, default 60 |
 
 ## Routes
 
@@ -85,11 +86,13 @@ Mounted at `/imports`:
 | Method | Path | |
 |---|---|---|
 | POST | `/files` | The file (multipart, field `file`) → `{ filePath, fileName, originalName, size }` |
-| POST | `/inspect` | `{ filePath }` → `{ format, sheets?, checks }`. `checks` lists what is wrong before anything loads: rows pasted into one cell, with "Recover them" as a choice |
+| POST | `/inspect` | `{ filePath }` → `{ format, sheets?, checks }`. `checks` lists what is wrong before anything loads: rows pasted into one cell, with "Recover them" as a choice. With `background: true` → `202 { runId }`, and the same answer is the run's `result`: the check reads **every row** of a CSV or Excel sheet, which on a file of gigabytes takes minutes, past any proxy's wait for an answer (nginx gives up after 60 s with a 504). `@xeplr/ui-utils` 1.1.10+ always asks for it this way |
 | POST | `/check-target` | `{ filePath, sheet?, connectionId, dbInfoId, targetTable }` → `{ exists, matched, extra, missing: [{ name, required }] }` |
 | POST | `/commit` | `{ filePath, connectionId, dbInfoId, originalFileName?, mappings: [{ sheet?, targetTable, mode, repairPastedRows?, primaryKeys? }] }` → **202** `{ runId }`. The import runs in the background. The same file is never imported twice at once (409) |
-| GET | `/runs/:id` | `{ status: running \| complete \| error \| stopped, progress, result: { results }, error }`. A run is shown only to the person who started it. Kept an hour after it ends |
-| POST | `/runs/:id/stop` | Stops it within a batch |
+| GET | `/runs/:id` | `{ kind: check \| import, status: running \| complete \| error \| stopped, progress, result, error }`. An import's `result` is `{ results }`, a check's is the inspect answer. A check's `progress` is `{ phase: 'checking', part, parts, sheet, rowsRead, bytesRead, bytes }` (`bytesRead` null for Excel). A run is shown only to the person who started it. Kept an hour after it ends |
+| POST | `/runs/:id/stop` | Stops an import within a batch, a check within a row |
+
+**Told, not only asked.** With `publish`, every run is told to its starter's stream: while running at most once a second, then once when it ends, carrying the result. The event is `{ type: 'import-run', runId, kind, status, progress, result, error }`, the same fields `GET /runs/:id` answers. A page subscribes before it starts a run and asks `GET /runs/:id` once after, so a run that ended before its event could be heard is not missed. Runs live in the memory of the process that runs them: with several API processes `GET /runs/:id` can land on another one and answer 404, while a stream whose processes relay events to each other (base-apis' `sse` under Node's cluster) still carries the ending.
 | GET | `/targets` | `listTargets` |
 | GET | `/history` | Past imports, newest first: `{ id, originalFileName, part, targetTable, destination, status, mode, totalRows, rowsLoaded, rowsDropped, errorMessage, createdByName, startedAt }` |
 | GET | `/history/:id/dropped` | The rows the database refused, from `<table>_import_errors`: `{ columns, rows: [{ rowNum, reason, values }], total, dropped }`, the first 1,000 |
@@ -128,5 +131,6 @@ The real router runs in an Express app, against real Postgres and a throwaway `x
 - delete
 - a stopped Replace leaving the table untouched
 - runs that only their importer can see
+- a 300,000-row CSV checked in the background: told to the stream with how far it read and the same answer as the plain inspect, stoppable; its import told the same way
 
 Without `PG_HOST`, only the startup checks run.
