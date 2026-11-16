@@ -49,8 +49,8 @@ function headers(extra) {
   return Object.assign({ 'x-company-id': COMPANY, 'x-workspace-id': WORKSPACE, 'x-test-user': 'u1' }, extra || {});
 }
 
-async function call(method, url, body, extra) {
-  var res = await fetch(ctx.base + url, { method: method, headers: Object.assign(headers(extra), body ? { 'content-type': 'application/json' } : {}),
+async function call(method, url, body, extra, base) {
+  var res = await fetch((base || ctx.base) + url, { method: method, headers: Object.assign(headers(extra), body ? { 'content-type': 'application/json' } : {}),
     body: body ? JSON.stringify(body) : undefined });
   var text = await res.text();
   var json = null;
@@ -114,6 +114,18 @@ test.before(async function() {
   var pg = require('pg');
   ctx.pool = new pg.Pool(PG);
 
+  ctx.config = config;
+  var main = await serve({
+    // The app's event stream, as far as the router can tell: what it was told, in order.
+    publish: function(userId, event) { told.push({ userId: userId, event: JSON.parse(JSON.stringify(event)) }); }
+  });
+  ctx.server = main.server;
+  ctx.base = main.base;
+});
+
+/** The import router in an Express app of its own, as an app mounts it — one API process. */
+async function serve(extra) {
+  var db = require('@xeplr/db');
   var express = require('express');
   var imports = require('..');
   var app = express();
@@ -123,20 +135,18 @@ test.before(async function() {
     req.user = { id: req.headers['x-test-user'], name: 'Tester ' + req.headers['x-test-user'] };
     next();
   });
-  app.use('/imports', imports.router({
-    config: config,
+  app.use('/imports', imports.router(Object.assign({
+    config: ctx.config,
     resolveTarget: async function(connectionId, dbInfoId) {
       return connectionId === 'pg' && dbInfoId === 'main' ? { dbType: 'postgres', dbConnection: PG } : null;
     },
     listTargets: async function() {
       return [{ connectionId: 'pg', label: 'Local', databases: [{ id: 'main', label: 'Main' }] }];
-    },
-    // The app's event stream, as far as the router can tell: what it was told, in order.
-    publish: function(userId, event) { told.push({ userId: userId, event: JSON.parse(JSON.stringify(event)) }); }
-  }));
-  await new Promise(function(resolve) { ctx.server = app.listen(0, '127.0.0.1', resolve); });
-  ctx.base = 'http://127.0.0.1:' + ctx.server.address().port;
-});
+    }
+  }, extra)));
+  var server = await new Promise(function(resolve) { var srv = app.listen(0, '127.0.0.1', function() { resolve(srv); }); });
+  return { server: server, base: 'http://127.0.0.1:' + server.address().port };
+}
 
 test.after(async function() {
   if (!PG) return;
@@ -145,6 +155,7 @@ test.after(async function() {
     await ctx.pool.query('DROP TABLE IF EXISTS "' + t + '"').catch(function() {});
   }
   await ctx.pool.end();
+  try { await require('@xeplr/utils').cache.getClient().quit(); } catch (e) { /* not opened */ }
   await ctx.configDb.destroy();
   await ctx.admin.raw('DROP DATABASE IF EXISTS ' + CONFIG_DB);
   await ctx.admin.destroy();
@@ -378,6 +389,61 @@ test('a big file\'s check runs in the background and is told to the stream, as i
   assert.equal(end.status, 'complete');
   assert.equal(end.result.results[0].rows, 300000);
   assert.ok(imported.every(function(t) { return t.userId === 'u1'; }));
+});
+
+test('several processes: a run is followed and stopped from another, and one file is imported once', { skip: skip }, async function(t) {
+  var { RunStore } = require('@xeplr/utils');
+  var probe = new RunStore({ store: 'redis' });
+  try { await probe.client().ping(); } catch (e) { t.skip('no Redis available'); return; }
+  // Two app processes, each with its own Redis connections, as two API workers have.
+  var prefix = 'xruns-imports-test-' + process.pid;
+  var storeA = new RunStore({ store: 'redis', prefix: prefix });
+  var storeB = new RunStore({ store: 'redis', prefix: prefix });
+  var a = await serve({ runStore: storeA });
+  var b = await serve({ runStore: storeB });
+  await storeA.listening(); await storeB.listening();
+  try {
+    var rows = ['sku,qty'];
+    for (var i = 0; i < 2000000; i++) rows.push('P' + i + ',' + i);
+    var fp = await upload('procs.csv', rows.join('\n'));
+    var started = await call('POST', '/imports/inspect', { filePath: fp, background: true }, null, a.base);
+    assert.equal(started.status, 202);
+    var id = started.body.runId;
+    var seen = (await call('GET', '/imports/runs/' + id, null, null, b.base)).body;
+    assert.equal(seen.status, 'running', 'the other process sees the run');
+    assert.equal(seen.kind, 'check');
+    assert.equal((await call('GET', '/imports/runs/' + id, null, { 'x-test-user': 'u2' }, b.base)).status, 404, 'nobody else does');
+    assert.equal((await call('POST', '/imports/runs/' + id + '/stop', null, { 'x-test-user': 'u2' }, b.base)).status, 404);
+    assert.equal((await call('POST', '/imports/runs/' + id + '/stop', null, null, b.base)).body.stopped, true, '✕ on the other process');
+    var ended;
+    for (var n = 0; n < 200; n++) {
+      ended = (await call('GET', '/imports/runs/' + id, null, null, b.base)).body;
+      if (ended.status !== 'running') break;
+      await new Promise(function(r) { setTimeout(r, 50); });
+    }
+    assert.equal(ended.status, 'stopped', 'the work in the first process stopped');
+    assert.equal(ended.error, 'Stopped');
+
+    // One file, imported once — the second press lands on the other process.
+    var one = await call('POST', '/imports/commit', { filePath: fp, connectionId: 'pg', dbInfoId: 'main',
+      mappings: [{ targetTable: TABLE + '_procs', mode: 'new' }] }, null, a.base);
+    assert.equal(one.status, 202);
+    var two = await call('POST', '/imports/commit', { filePath: fp, connectionId: 'pg', dbInfoId: 'main',
+      mappings: [{ targetTable: TABLE + '_procs', mode: 'new' }] }, null, b.base);
+    assert.equal(two.status, 409, 'refused on the other process too');
+    assert.equal((await call('POST', '/imports/runs/' + one.body.runId + '/stop', null, null, b.base)).body.stopped, true);
+    for (var m = 0; m < 200; m++) {
+      var r = (await call('GET', '/imports/runs/' + one.body.runId, null, null, b.base)).body;
+      if (r.status !== 'running') { assert.equal(r.status, 'stopped'); break; }
+      await new Promise(function(res) { setTimeout(res, 50); });
+    }
+  } finally {
+    await new Promise(function(r) { a.server.close(r); });
+    await new Promise(function(r) { b.server.close(r); });
+    await storeA.close(); await storeB.close();
+    await ctx.pool.query('DROP TABLE IF EXISTS "' + TABLE + '_procs"').catch(function() {});
+    await ctx.pool.query('DROP TABLE IF EXISTS "' + TABLE + '_procs_import_errors"').catch(function() {});
+  }
 });
 
 test('a run is the importer\'s own, and it can be stopped', { skip: skip }, async function() {
