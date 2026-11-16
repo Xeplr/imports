@@ -62,6 +62,7 @@ On the screen side, add one route for `<ImportsPage/>` and a drawer entry. That 
 | `listTargets(req)` | the same connections, as a list for the picker |
 | `service` | names this app's rows in the shared `import_meta` table. Or pass `config`, an `attachConfig()` instance the app already has |
 | `userNames(ids)` (optional) | names for records made before the importer's name was stored on them |
+| `runStore` (optional) | where runs are kept so **any** of the app's processes can answer `GET /runs/:id` and ✕: an `@xeplr/utils` `RunStore` the app already keeps its own runs in. Without it, `RunStore.fromEnv()`, which reads `XEPLR_RUNS_STORE` (see Settings) |
 | `publish(userId, event)` (optional) | the app's event stream (SSE). A check's and an import's progress and ending are told to the person who started them, so the page waits on the stream instead of asking every second. Pass the app's **own** publisher, e.g. `function(userId, e) { sse.publish('user:' + userId + ':imports', e); }` with the app's `@xeplr/base-apis` `sse`: this package's copy of base-apis is not the one the app's stream is attached to, so publishing through it would reach nobody. Without it the page asks `GET /runs/:id` |
 
 Tenancy comes from the app's `mtMiddleware`, as it does for its other routes. Each import record carries `mtId1`/`mtId2`, and history reads them back through the tenant filter, so another company's or workspace's imports are simply not found. Import records live in `xeplr_configs` and are application-scoped (`registerApplication()` at startup).
@@ -77,6 +78,7 @@ Database drivers are the app's own: install `pg`, `mysql2`, `mssql` or `@duckdb/
 | `XEPLR_DATA_DIR` | **yes**, absolute (`@xeplr/actions`) | The data root. An upload is staged in the requesting tenant's own `uploads/` folder under it (`<root>/<app>/<company>/<workspace>/uploads`) until imported; a dropped-rows download is written in its `tmp/` for the moment it is sent. Asked per request, so one company's files never sit beside another's. Never defaulted: a missing, relative or absent one is refused by name. |
 | `XCFG_DB_NAME` | **yes** | The `xeplr_configs` database holding `import_meta`. The login is `XCFG_DB_CONNECTION_INFO_ENCRYPTED`, or the shared `XEPLR_DB_CONNECTION` (`@xeplr/db`) |
 | `UPLOAD_MAX_MB` | no | The largest file accepted, default 500. Files go to disk and are streamed, so this costs disk, not memory. A proxy in front (nginx `client_max_body_size`) must allow at least as much |
+| `XEPLR_RUNS_STORE` | **with several processes** | `redis` or `memory`: where a check's and an import's run is kept, unless the app passes `runStore`. `memory` is right for one process. **With several** (Node's cluster, or several servers behind one address) it must be `redis` (the Redis of `@xeplr/utils`' cache: `REDIS_HOST`, `REDIS_PORT`, …), or a ✕ or a "how far" landing on another process finds nothing. Unset in a cluster worker, the router refuses to start, naming it; several servers that are not one cluster cannot be detected, so set it there |
 | `IMPORT_TIME_LIMIT_MINUTES` | no | How long an import, or a check run in the background, may run before it is stopped, default 60 |
 
 ## Routes
@@ -92,7 +94,9 @@ Mounted at `/imports`:
 | GET | `/runs/:id` | `{ kind: check \| import, status: running \| complete \| error \| stopped, progress, result, error }`. An import's `result` is `{ results }`, a check's is the inspect answer. A check's `progress` is `{ phase: 'checking', part, parts, sheet, rowsRead, bytesRead, bytes }` (`bytesRead` null for Excel). A run is shown only to the person who started it. Kept an hour after it ends |
 | POST | `/runs/:id/stop` | Stops an import within a batch, a check within a row |
 
-**Told, not only asked.** With `publish`, every run is told to its starter's stream: while running at most once a second, then once when it ends, carrying the result. The event is `{ type: 'import-run', runId, kind, status, progress, result, error }`, the same fields `GET /runs/:id` answers. A page subscribes before it starts a run and asks `GET /runs/:id` once after, so a run that ended before its event could be heard is not missed. Runs live in the memory of the process that runs them: with several API processes `GET /runs/:id` can land on another one and answer 404, while a stream whose processes relay events to each other (base-apis' `sse` under Node's cluster) still carries the ending.
+**Told, not only asked.** With `publish`, every run is told to its starter's stream by the process doing the work: while running at most once a second, then once when it ends, carrying the result. The event is `{ type: 'import-run', runId, kind, status, progress, result, error }`, the same fields `GET /runs/:id` answers. A page subscribes before it starts a run and asks `GET /runs/:id` once after, so a run that ended before its event could be heard is not missed.
+
+**From any process.** A run is an `@xeplr/utils` `RunRegistry`: its work and stop switch stay in the process doing it, and what it says about itself is kept in the `RunStore`. `GET /runs/:id` reads it from whichever process answers, and `/stop` reaches the process with the work. "One import per file at a time" is a claim in the same store, so a second press landing on another process is refused (409) too.
 | GET | `/targets` | `listTargets` |
 | GET | `/history` | Past imports, newest first: `{ id, originalFileName, part, targetTable, destination, status, mode, totalRows, rowsLoaded, rowsDropped, errorMessage, createdByName, startedAt }` |
 | GET | `/history/:id/dropped` | The rows the database refused, from `<table>_import_errors`: `{ columns, rows: [{ rowNum, reason, values }], total, dropped }`, the first 1,000 |
@@ -131,6 +135,7 @@ The real router runs in an Express app, against real Postgres and a throwaway `x
 - delete
 - a stopped Replace leaving the table untouched
 - runs that only their importer can see
+- several processes (two app instances, each with its own Redis connections): a check started on one is seen and stopped from the other, nobody else sees or stops it, and a second import of the same file on the other is refused
 - a 300,000-row CSV checked in the background: told to the stream with how far it read and the same answer as the plain inspect, stoppable; its import told the same way
 
 Without `PG_HOST`, only the startup checks run.
