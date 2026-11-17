@@ -88,7 +88,7 @@ Mounted at `/imports`:
 | Method | Path | |
 |---|---|---|
 | POST | `/files` | The file (multipart, field `file`) → `{ filePath, fileName, originalName, size }` |
-| POST | `/inspect` | `{ filePath }` → `{ format, sheets?, checks }`. `checks` lists what is wrong before anything loads: rows pasted into one cell, with "Recover them" as a choice. With `background: true` → `202 { runId }`, and the same answer is the run's `result`: the check reads **every row** of a CSV or Excel sheet, which on a file of gigabytes takes minutes, past any proxy's wait for an answer (nginx gives up after 60 s with a 504). `@xeplr/ui-utils` 1.1.10+ always asks for it this way |
+| POST | `/inspect` | `{ filePath }` → `{ format, sheets?, checks }`. `checks` lists what is wrong before anything loads: rows pasted into one cell, with "Recover them" as a choice. A part with more than **1,000,000 rows is not checked at all** (`CHECK_MAX_ROWS`): checking only its start would say nothing about the rest. A CSV's rows are estimated from its first MB, nothing more is read, and `checks` carries a note with no fix: `{ key: 'notChecked', message: 'Not checked for rows pasted into one cell: the file has more than 1,000,000 rows.' }`. With `background: true` → `202 { runId }`, and the same answer is the run's `result`: the check reads **every row** of a CSV or Excel sheet, which on a file of gigabytes takes minutes, past any proxy's wait for an answer (nginx gives up after 60 s with a 504). `@xeplr/ui-utils` 1.1.10+ always asks for it this way |
 | POST | `/check-target` | `{ filePath, sheet?, connectionId, dbInfoId, targetTable }` → `{ exists, matched, extra, missing: [{ name, required }] }` |
 | POST | `/commit` | `{ filePath, connectionId, dbInfoId, originalFileName?, mappings: [{ sheet?, targetTable, mode, repairPastedRows?, primaryKeys? }] }` → **202** `{ runId }`. The import runs in the background. The same file is never imported twice at once (409) |
 | GET | `/runs/:id` | `{ kind: check \| import, status: running \| complete \| error \| stopped, progress, result, error }`. An import's `result` is `{ results }`, a check's is the inspect answer. A check's `progress` is `{ phase: 'checking', part, parts, sheet, rowsRead, bytesRead, bytes }` (`bytesRead` null for Excel). A run is shown only to the person who started it. Kept an hour after it ends |
@@ -135,7 +135,7 @@ The real router runs in an Express app, against real Postgres and a throwaway `x
 - delete
 - a stopped Replace leaving the table untouched
 - runs that only their importer can see
-- several processes (two app instances, each with its own Redis connections): a check started on one is seen and stopped from the other, nobody else sees or stops it, and a second import of the same file on the other is refused
+- a 2,000,000-row CSV: its check skipped at once with the note; several processes (two app instances, each with its own Redis connections): its import started on one is seen and stopped from the other, nobody else sees or stops it, and a second import of the same file on the other is refused
 - a 300,000-row CSV checked in the background: told to the stream with how far it read and the same answer as the plain inspect, stoppable; its import told the same way
 
 Without `PG_HOST`, only the startup checks run.

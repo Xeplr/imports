@@ -406,14 +406,30 @@ test('several processes: a run is followed and stopped from another, and one fil
     var rows = ['sku,qty'];
     for (var i = 0; i < 2000000; i++) rows.push('P' + i + ',' + i);
     var fp = await upload('procs.csv', rows.join('\n'));
-    var started = await call('POST', '/imports/inspect', { filePath: fp, background: true }, null, a.base);
-    assert.equal(started.status, 202);
-    var id = started.body.runId;
+
+    // Over CHECK_MAX_ROWS the check is skipped at once, and says so.
+    var t0 = Date.now();
+    var skipped = await call('POST', '/imports/inspect', { filePath: fp }, null, a.base);
+    assert.deepEqual(skipped.body.checks, { '': [{ key: 'notChecked',
+      message: 'Not checked for rows pasted into one cell: the file has more than 1,000,000 rows.', examples: [] }] });
+    assert.ok(Date.now() - t0 < 2000, 'skipped, not read (' + (Date.now() - t0) + ' ms)');
+
+    // The import: started on one process, followed and stopped from the other.
+    var one = await call('POST', '/imports/commit', { filePath: fp, connectionId: 'pg', dbInfoId: 'main',
+      mappings: [{ targetTable: TABLE + '_procs', mode: 'new' }] }, null, a.base);
+    assert.equal(one.status, 202);
+    var id = one.body.runId;
     var seen = (await call('GET', '/imports/runs/' + id, null, null, b.base)).body;
     assert.equal(seen.status, 'running', 'the other process sees the run');
-    assert.equal(seen.kind, 'check');
+    assert.equal(seen.kind, 'import');
     assert.equal((await call('GET', '/imports/runs/' + id, null, { 'x-test-user': 'u2' }, b.base)).status, 404, 'nobody else does');
     assert.equal((await call('POST', '/imports/runs/' + id + '/stop', null, { 'x-test-user': 'u2' }, b.base)).status, 404);
+
+    // One file, imported once — the second press lands on the other process.
+    var two = await call('POST', '/imports/commit', { filePath: fp, connectionId: 'pg', dbInfoId: 'main',
+      mappings: [{ targetTable: TABLE + '_procs', mode: 'new' }] }, null, b.base);
+    assert.equal(two.status, 409, 'refused on the other process too');
+
     assert.equal((await call('POST', '/imports/runs/' + id + '/stop', null, null, b.base)).body.stopped, true, '✕ on the other process');
     var ended;
     for (var n = 0; n < 200; n++) {
@@ -423,20 +439,6 @@ test('several processes: a run is followed and stopped from another, and one fil
     }
     assert.equal(ended.status, 'stopped', 'the work in the first process stopped');
     assert.equal(ended.error, 'Stopped');
-
-    // One file, imported once — the second press lands on the other process.
-    var one = await call('POST', '/imports/commit', { filePath: fp, connectionId: 'pg', dbInfoId: 'main',
-      mappings: [{ targetTable: TABLE + '_procs', mode: 'new' }] }, null, a.base);
-    assert.equal(one.status, 202);
-    var two = await call('POST', '/imports/commit', { filePath: fp, connectionId: 'pg', dbInfoId: 'main',
-      mappings: [{ targetTable: TABLE + '_procs', mode: 'new' }] }, null, b.base);
-    assert.equal(two.status, 409, 'refused on the other process too');
-    assert.equal((await call('POST', '/imports/runs/' + one.body.runId + '/stop', null, null, b.base)).body.stopped, true);
-    for (var m = 0; m < 200; m++) {
-      var r = (await call('GET', '/imports/runs/' + one.body.runId, null, null, b.base)).body;
-      if (r.status !== 'running') { assert.equal(r.status, 'stopped'); break; }
-      await new Promise(function(res) { setTimeout(res, 50); });
-    }
   } finally {
     await new Promise(function(r) { a.server.close(r); });
     await new Promise(function(r) { b.server.close(r); });

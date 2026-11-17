@@ -29,7 +29,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@xeplr/actions": "^2.2.11",
+    "@xeplr/actions": "^2.2.12",
     "@xeplr/base-apis": "^2.0.3",
     "@xeplr/db": "^1.0.8",
     "@xeplr/utils": "^1.1.6",
