@@ -448,6 +448,37 @@ test('several processes: a run is followed and stopped from another, and one fil
   }
 });
 
+test('beforeCommit: the app\'s own check runs before an import starts, and its refusal is answered', { skip: skip }, async function() {
+  var seen = null;
+  var app = await serve({ beforeCommit: async function(req, file) {
+    seen = file;
+    if (file.mappings[0].targetTable === 'refuse_me') throw Object.assign(new Error('Too many rows for your plan.'), { status: 413, code: 'PLAN_ROWS' });
+  } });
+  try {
+    var fp = await upload('hook.csv', 'sku,qty\nH1,1\nH2,2\n');
+    var refused = await call('POST', '/imports/commit', { filePath: fp, connectionId: 'pg', dbInfoId: 'main',
+      mappings: [{ targetTable: 'refuse_me', mode: 'new' }] }, null, app.base);
+    assert.equal(refused.status, 413);
+    assert.deepEqual(refused.body, { error: 'Too many rows for your plan.', code: 'PLAN_ROWS' });
+    assert.equal(seen.format, 'csv');
+    assert.equal(seen.size, 'sku,qty\nH1,1\nH2,2\n'.length, 'it is told the file\'s size');
+    assert.equal(seen.filePath, path.join(UPLOADS, path.basename(fp)), 'and the file itself, already checked');
+    assert.equal(seen.dbInfoId, 'main');
+    assert.ok(fs.existsSync(seen.filePath), 'a refused import leaves the file, to try again');
+    var allowed = await call('POST', '/imports/commit', { filePath: fp, connectionId: 'pg', dbInfoId: 'main',
+      mappings: [{ targetTable: TABLE + '_hook', mode: 'new' }] }, null, app.base);
+    assert.equal(allowed.status, 202, 'passed, it imports');
+    for (var i = 0; i < 100; i++) {
+      var run = (await call('GET', '/imports/runs/' + allowed.body.runId, null, null, app.base)).body;
+      if (run.status !== 'running') { assert.equal(run.status, 'complete'); break; }
+      await new Promise(function(r) { setTimeout(r, 50); });
+    }
+  } finally {
+    await new Promise(function(r) { app.server.close(r); });
+    await ctx.pool.query('DROP TABLE IF EXISTS "' + TABLE + '_hook"').catch(function() {});
+  }
+});
+
 test('a run is the importer\'s own, and it can be stopped', { skip: skip }, async function() {
   var big = ['sku,qty'];
   for (var i = 0; i < 200000; i++) big.push('S' + i + ',' + i);
